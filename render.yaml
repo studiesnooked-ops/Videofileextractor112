@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: text-to-video-bot
+    plan: free
+    env: docker
+    dockerfilePath: Dockerfile
+    # IMPORTANT: Replace this with your actual GitHub repository URL
+    repo: https://github.com/YOUR_USERNAME/text-to-video-bot
+    branch: main
+    autoDeploy: false
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: PORT
+        value: "8000"
