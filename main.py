@@ -1,18 +1,16 @@
+"""
+Enhanced Telegram Bot with ClassX Support
+Downloads from YouTube, Instagram, TikTok, and ClassX courses
+"""
+
 import os
-import sys
+import yt_dlp
 import requests
-import json
 import subprocess
 from pyrogram import Client, filters
-from pyrogram.types import Message
 from vars import API_ID, API_HASH, BOT_TOKEN
-import logging
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Initialize Pyrogram client
+# Initialize bot
 app = Client(
     "media_downloader_bot",
     api_id=API_ID,
@@ -20,323 +18,261 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-class ContentDownloader:
-    """Download content from various sources"""
+# Setup downloads directory
+DOWNLOADS_DIR = "downloads"
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
+
+class URLProcessor:
+    """Process different types of URLs"""
     
-    def __init__(self):
-        self.session = requests.Session()
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://classx.co.in/',
-            'Accept': '*/*'
-        }
+    @staticmethod
+    def is_classx_url(url):
+        """Check if URL is from ClassX API"""
+        return "appxapi.vercel.app" in url or "classx.co.in" in url
     
-    def is_valid_url(self, url):
-        """Check if URL is valid"""
+    @staticmethod
+    def is_video_url(url):
+        """Check if URL is a video (YouTube, Instagram, TikTok, etc)"""
+        video_domains = [
+            'youtube.com', 'youtu.be',
+            'instagram.com', 'tiktok.com',
+            'facebook.com', 'twitter.com', 'x.com',
+            'dailymotion.com', 'vimeo.com'
+        ]
+        return any(domain in url for domain in video_domains)
+    
+    @staticmethod
+    def extract_m3u8_url(api_url):
+        """Extract m3u8 URL from ClassX API"""
         try:
-            result = requests.head(url, headers=self.headers, timeout=5)
-            return result.status_code < 400
+            response = requests.get(api_url, timeout=10)
+            
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    
+                    for key in ['url', 'video_url', 'm3u8', 'stream_url', 'playUrl']:
+                        if key in data:
+                            return data[key]
+                    
+                    if isinstance(data, dict):
+                        return URLProcessor._find_url_in_dict(data)
+                
+                except:
+                    if 'm3u8' in response.text:
+                        return api_url
+            
+            return None
         except:
-            return False
+            return None
     
-    def download_m3u8_video(self, url, output_path):
-        """Download HLS video using ffmpeg"""
-        try:
-            cmd = [
-                'ffmpeg',
-                '-i', url,
-                '-c', 'copy',
-                '-bsf:a', 'aac_adtstoasc',
-                output_path,
-                '-loglevel', 'error'
-            ]
-            
-            subprocess.run(cmd, check=True, capture_output=True, timeout=3600)
-            return True
-        except Exception as e:
-            logger.error(f"Video download error: {e}")
-            return False
+    @staticmethod
+    def _find_url_in_dict(data, depth=0):
+        """Recursively find URL in dictionary"""
+        if depth > 5:
+            return None
+        
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if 'url' in key.lower():
+                    if isinstance(value, str) and value.startswith('http'):
+                        return value
+                result = URLProcessor._find_url_in_dict(value, depth + 1)
+                if result:
+                    return result
+        elif isinstance(data, list):
+            for item in data:
+                result = URLProcessor._find_url_in_dict(item, depth + 1)
+                if result:
+                    return result
+        
+        return None
+
+
+class Downloader:
+    """Download media from various sources"""
     
-    def download_pdf(self, url, output_path):
-        """Download PDF file"""
+    @staticmethod
+    def download_video_ytdlp(url, title):
+        """Download using yt-dlp"""
         try:
-            response = requests.get(url, headers=self.headers, timeout=60)
-            response.raise_for_status()
-            
-            with open(output_path, 'wb') as f:
-                f.write(response.content)
-            
-            return True
-        except Exception as e:
-            logger.error(f"PDF download error: {e}")
-            return False
-    
-    def download_from_youtube(self, url, output_path):
-        """Download from YouTube using yt-dlp"""
-        try:
-            import yt_dlp
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_'))[:50]
             
             ydl_opts = {
                 'format': 'best',
-                'outtmpl': output_path.replace('.mp4', ''),
-                'quiet': True,
-                'no_warnings': True
+                'outtmpl': os.path.join(DOWNLOADS_DIR, f"{safe_title}.%(ext)s"),
+                'quiet': False,
+                'no_warnings': False
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            
-            return True
+                info = ydl.extract_info(url, download=True)
+                video_path = ydl.prepare_filename(info)
+                return video_path if os.path.exists(video_path) else None
+        
         except Exception as e:
-            logger.error(f"YouTube download error: {e}")
-            return False
-
-
-downloader = ContentDownloader()
+            print(f"yt-dlp error: {e}")
+            return None
+    
+    @staticmethod
+    def download_m3u8_video(m3u8_url, title):
+        """Download m3u8 using ffmpeg"""
+        try:
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_'))[:50]
+            output_path = os.path.join(DOWNLOADS_DIR, f"{safe_title}.mp4")
+            
+            cmd = [
+                'ffmpeg',
+                '-i', m3u8_url,
+                '-c', 'copy',
+                '-bsf:a', 'aac_adtstoasc',
+                output_path,
+                '-y'
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, timeout=600)
+            
+            if result.returncode == 0 and os.path.exists(output_path):
+                return output_path
+            return None
+        
+        except:
+            return None
+    
+    @staticmethod
+    def download_pdf(pdf_url, title):
+        """Download PDF"""
+        try:
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_'))[:50]
+            output_path = os.path.join(DOWNLOADS_DIR, f"{safe_title}.pdf")
+            
+            response = requests.get(pdf_url, timeout=30)
+            
+            if response.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    f.write(response.content)
+                return output_path
+            
+            return None
+        
+        except:
+            return None
 
 
 @app.on_message(filters.command("start"))
-async def start_command(client: Client, message: Message):
+async def start_command(client, message):
     """Start command"""
     await message.reply_text(
-        "🤖 **Welcome to Content Downloader Bot!**\n\n"
-        "📝 **How to use:**\n"
-        "1. Create a `.txt` file with content URLs (one per line)\n"
-        "2. Format: `Title : URL` (optional)\n"
-        "3. Send the file to me\n\n"
-        "✅ **Supported Content:**\n"
-        "• YouTube videos\n"
-        "• Course videos (M3U8/HLS)\n"
-        "• Course PDF notes\n"
-        "• Direct video/audio links\n\n"
-        "⚠️ **Important:**\n"
-        "• Only download content you have access to\n"
-        "• Don't redistribute copyrighted material\n"
-        "• Respect platform ToS\n\n"
-        "📄 **Example file format:**\n"
-        "```\nLecture 1 : https://youtube.com/watch?v=...\n"
-        "Notes : https://example.com/notes.pdf\n```"
+        "🤖 **Media Downloader Bot**\n\n"
+        "Send me a `.txt` file with:\n"
+        "✅ YouTube, Instagram, TikTok links\n"
+        "✅ ClassX course URLs (m3u8 & PDF)\n"
+        "✅ Other video platform links\n\n"
+        "Format: `Title : URL`\n"
+        "One link per line"
     )
 
 
 @app.on_message(filters.document)
-async def handle_document(client: Client, message: Message):
-    """Handle document uploads"""
+async def handle_document(client, message):
+    """Handle file uploads"""
     
-    # Check if it's a text file
     if message.document.mime_type != "text/plain":
-        await message.reply_text("❌ Please send a plain text (.txt) file only!")
+        await message.reply_text("❌ Please send a `.txt` file")
         return
     
     status_msg = await message.reply_text("📥 Processing your file...")
     
-    # Download the text file
-    txt_file_path = await message.download()
-    
     try:
-        # Read URLs from file
-        with open(txt_file_path, 'r') as file:
-            lines = file.readlines()
+        # Download file
+        txt_file_path = await message.download()
         
-        urls_found = len([l for l in lines if l.strip() and ':' in l])
+        with open(txt_file_path, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f.readlines() if line.strip()]
         
-        if urls_found == 0:
-            await status_msg.edit_text(
-                "❌ No valid URLs found!\n\n"
-                "Format should be:\n"
-                "`Title : URL`"
-            )
+        if not lines:
+            await status_msg.edit_text("❌ File is empty")
             return
         
-        await status_msg.edit_text(
-            f"✅ Found {urls_found} URL(s)\n"
-            "⏳ Starting downloads...\n\n"
-            "_This may take a while..._"
-        )
+        await status_msg.edit_text(f"📋 Found {len(lines)} items. Starting download...")
         
-        download_count = 0
-        error_count = 0
-        
-        # Process each URL
-        for line_num, line in enumerate(lines, 1):
-            line = line.strip()
-            
-            if not line or ':' not in line:
-                continue
-            
+        # Process each line
+        for idx, line in enumerate(lines, 1):
             try:
                 # Parse title and URL
-                if ' : ' in line:
-                    title, url = line.split(' : ', 1)
-                    title = title.strip()
-                    url = url.strip()
-                else:
-                    title = f"Download {line_num}"
-                    url = line
-                
-                await status_msg.edit_text(
-                    f"📥 Downloading: {title}\n"
-                    f"Progress: {download_count + error_count}/{urls_found}"
-                )
-                
-                # Validate URL
-                if not url.startswith('http'):
-                    await message.reply_text(f"❌ Invalid URL: {title}")
-                    error_count += 1
+                if ':' not in line:
                     continue
                 
-                # Create downloads directory
-                os.makedirs("downloads", exist_ok=True)
+                parts = line.split(':', 1)
+                title = parts[0].strip()
+                url = parts[1].strip()
                 
-                # Determine content type and download
-                success = False
-                output_file = None
+                if not url.startswith('http'):
+                    continue
                 
-                if url.endswith('/main.m3u8'):
-                    # ClassX/AppX video (M3U8)
-                    logger.info(f"Downloading M3U8 video: {title}")
-                    output_file = f"downloads/{title}.mp4"
-                    
-                    await status_msg.edit_text(
-                        f"🎬 Downloading video: {title}\n"
-                        f"(This may take several minutes...)\n"
-                        f"Progress: {download_count + error_count}/{urls_found}"
-                    )
-                    
-                    success = downloader.download_m3u8_video(url, output_file)
+                await status_msg.edit_text(f"⬇️ [{idx}/{len(lines)}] {title}")
                 
-                elif url.endswith('.pdf'):
-                    # PDF file
-                    logger.info(f"Downloading PDF: {title}")
-                    output_file = f"downloads/{title}.pdf"
-                    
-                    await status_msg.edit_text(
-                        f"📄 Downloading PDF: {title}\n"
-                        f"Progress: {download_count + error_count}/{urls_found}"
-                    )
-                    
-                    success = downloader.download_pdf(url, output_file)
+                # Determine URL type and download
+                downloaded_file = None
                 
-                elif 'youtube.com' in url or 'youtu.be' in url:
-                    # YouTube video
-                    logger.info(f"Downloading YouTube: {title}")
-                    output_file = f"downloads/{title}.mp4"
+                if URLProcessor.is_classx_url(url):
+                    # ClassX URL
+                    if 'main.m3u8' in url:
+                        m3u8_url = URLProcessor.extract_m3u8_url(url)
+                        if m3u8_url:
+                            downloaded_file = Downloader.download_m3u8_video(m3u8_url, title)
                     
-                    await status_msg.edit_text(
-                        f"▶️ Downloading YouTube: {title}\n"
-                        f"Progress: {download_count + error_count}/{urls_found}"
-                    )
-                    
-                    success = downloader.download_from_youtube(url, output_file)
+                    elif '.pdf' in url:
+                        downloaded_file = Downloader.download_pdf(url, title)
+                
+                elif URLProcessor.is_video_url(url):
+                    # Standard video URL (YouTube, Instagram, etc)
+                    downloaded_file = Downloader.download_video_ytdlp(url, title)
                 
                 else:
-                    # Try with yt-dlp
-                    logger.info(f"Downloading with yt-dlp: {title}")
-                    output_file = f"downloads/{title}.mp4"
-                    
-                    try:
-                        import yt_dlp
-                        ydl_opts = {'format': 'best', 'quiet': True}
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.download([url])
-                        success = True
-                    except:
-                        # Try direct PDF download
-                        success = downloader.download_pdf(url, output_file)
+                    # Try as direct file
+                    downloaded_file = Downloader.download_video_ytdlp(url, title)
                 
                 # Send downloaded file
-                if success and output_file and os.path.exists(output_file):
+                if downloaded_file and os.path.exists(downloaded_file):
+                    if downloaded_file.endswith('.pdf'):
+                        await message.reply_document(
+                            document=downloaded_file,
+                            caption=f"📄 {title}"
+                        )
+                    else:
+                        await message.reply_video(
+                            video=downloaded_file,
+                            caption=f"🎬 {title}"
+                        )
+                    
+                    # Cleanup
                     try:
-                        # Determine file type and send accordingly
-                        if output_file.endswith('.pdf'):
-                            await message.reply_document(
-                                document=output_file,
-                                caption=f"✅ {title}"
-                            )
-                        else:
-                            # Get file size
-                            file_size = os.path.getsize(output_file)
-                            
-                            # Telegram's file size limit is 2GB
-                            if file_size > 2 * 1024 * 1024 * 1024:
-                                await message.reply_text(
-                                    f"⚠️ {title}\n"
-                                    f"File too large ({file_size / (1024**3):.2f}GB)\n"
-                                    f"Telegram limit: 2GB"
-                                )
-                            else:
-                                await message.reply_video(
-                                    video=output_file,
-                                    caption=f"✅ {title}",
-                                    thumb=None
-                                )
-                        
-                        download_count += 1
-                        
-                    except Exception as e:
-                        await message.reply_text(f"❌ Failed to send {title}: {str(e)}")
-                        error_count += 1
-                    finally:
-                        # Clean up
-                        try:
-                            os.remove(output_file)
-                        except:
-                            pass
+                        os.remove(downloaded_file)
+                    except:
+                        pass
                 else:
-                    await message.reply_text(f"❌ Failed to download: {title}")
-                    error_count += 1
+                    await message.reply_text(f"❌ Failed: {title}")
             
             except Exception as e:
-                logger.error(f"Error processing line {line_num}: {e}")
                 await message.reply_text(f"❌ Error: {str(e)[:100]}")
-                error_count += 1
         
-        # Final status
-        await status_msg.edit_text(
-            f"✅ **Download Complete!**\n\n"
-            f"✅ Success: {download_count}\n"
-            f"❌ Failed: {error_count}\n"
-            f"📊 Total: {urls_found}"
-        )
+        await status_msg.edit_text("✅ All done!")
     
     except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
-        logger.error(f"Error in handle_document: {e}")
+        await status_msg.edit_text(f"❌ Error: {str(e)[:200]}")
     
     finally:
-        # Clean up
-        if os.path.exists(txt_file_path):
-            os.remove(txt_file_path)
-
-
-@app.on_message(filters.text)
-async def handle_text(client: Client, message: Message):
-    """Handle text messages"""
-    text = message.text.strip()
-    
-    if text.startswith('http'):
-        # User sent a direct URL
-        await message.reply_text(
-            "💡 **Send as text file instead!**\n\n"
-            "For better batch processing, create a `.txt` file with one URL per line and send it.\n\n"
-            "Example:\n"
-            "```\nTitle 1 : https://...\n"
-            "Title 2 : https://...\n```"
-        )
-    else:
-        await message.reply_text(
-            "ℹ️ Send me a `.txt` file with URLs to download content!\n\n"
-            "Use `/start` for more info."
-        )
+        # Cleanup
+        try:
+            if os.path.exists(txt_file_path):
+                os.remove(txt_file_path)
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    logger.info("🤖 Content Downloader Bot Starting...")
+    print("🤖 Bot is starting...")
     os.makedirs("downloads", exist_ok=True)
-    
-    try:
-        app.run()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
+    app.run()
