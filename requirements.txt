@@ -1,7 +1,7 @@
-pyrogram
-tgcrypto
-yt-dlp
-flask
-gunicorn
-python-dotenv
-requests
+pyrogram>=2.0.0
+tgcrypto>=1.2.5
+yt-dlp>=2023.0.0
+flask>=2.3.0
+gunicorn>=21.0.0
+python-dotenv>=1.0.0
+requests>=2.28.0
