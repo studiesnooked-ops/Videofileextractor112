@@ -1,20 +1,15 @@
-"""
-Telegram Video Extractor Bot for Render
-"""
-
 import os
 import re
 import yt_dlp
 import requests
 import subprocess
-from flask import Flask, request
+from flask import Flask
 from pyrogram import Client, filters
 from multiprocessing import Process
 
-# Flask app for web service
 app = Flask(__name__)
 
-# ===== ENVIRONMENT =====
+# Environment Variables
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -22,22 +17,17 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 SUDO_USERS = [int(x) for x in os.getenv("SUDO_USERS", "").split() if x]
 SUDO_USERS.append(OWNER_ID)
 
-# Downloads folder
 DOWNLOADS_DIR = "downloads"
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
-# ===== PYROGRAM BOT =====
-pyrogram_bot = Client(
-    "saini_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+# Pyrogram Bot
+bot = Client("saini_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# ===== HELPER FUNCTIONS =====
 def clean_filename(title):
-    name = re.sub(r'[^\w\s-]', '', title).strip()[:50]
-    return name.replace(' ', '_')
+    return re.sub(r'[^\w\s-]', '', title).strip()[:50].replace(' ', '_')
+
+def has_access(user_id):
+    return user_id in SUDO_USERS or user_id == OWNER_ID
 
 def is_classx(url):
     return any(x in url.lower() for x in ['classx', 'appxapi', 'clsx'])
@@ -52,7 +42,6 @@ def is_video(url):
     sites = ['youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com', 'facebook.com']
     return any(x in url.lower() for x in sites)
 
-# ===== DOWNLOADERS =====
 def download_video(url, title):
     try:
         safe_name = clean_filename(title)
@@ -71,7 +60,6 @@ def download_video(url, title):
         if os.path.exists(output):
             return output
         
-        # Find downloaded file
         for f in os.listdir(DOWNLOADS_DIR):
             full = os.path.join(DOWNLOADS_DIR, f)
             if os.path.isfile(full) and f.endswith('.mp4'):
@@ -89,9 +77,7 @@ def download_m3u8(url, title):
         cmd = ['ffmpeg', '-i', url, '-c', 'copy', '-y', output]
         result = subprocess.run(cmd, capture_output=True, timeout=300)
         
-        if os.path.exists(output):
-            return output
-        return None
+        return output if os.path.exists(output) else None
     except Exception as e:
         print(f"[M3U8 ERROR] {e}")
         return None
@@ -130,22 +116,12 @@ def get_classx_url(api_url):
         print(f"[CLASSX ERROR] {e}")
         return None
 
-# ===== ACCESS CHECK =====
-def has_access(user_id):
-    return user_id in SUDO_USERS or user_id == OWNER_ID
-
-# ===== PYROGRAM HANDLERS =====
-@pyrogram_bot.on_message(filters.command("start"))
+@bot.on_message(filters.command("start"))
 async def start_cmd(client, msg):
     if has_access(msg.from_user.id):
-        await msg.reply_text("✅ Bot Working!\n\nSend me a .txt file with links.")
+        await msg.reply_text("✅ Bot Working!")
 
-@pyrogram_bot.on_message(filters.command("ping"))
-async def ping_cmd(client, msg):
-    if has_access(msg.from_user.id):
-        await msg.reply_text("pong 🏓")
-
-@pyrogram_bot.on_message(filters.document)
+@bot.on_message(filters.document)
 async def handle_txt(client, msg):
     user_id = msg.from_user.id
     
@@ -154,7 +130,7 @@ async def handle_txt(client, msg):
         return
     
     if msg.document.file_name and not msg.document.file_name.endswith('.txt'):
-        await msg.reply_text("❌ Send only .txt file")
+        await msg.reply_text("❌ Send .txt file only")
         return
     
     txt_path = None
@@ -166,7 +142,6 @@ async def handle_txt(client, msg):
         with open(txt_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         
-        # Parse links
         links = []
         for line in lines:
             line = line.strip()
@@ -186,17 +161,14 @@ async def handle_txt(client, msg):
         failed = 0
         
         for i, (title, url) in enumerate(links, 1):
-            await status.edit_text(f"⬇️ [{i}/{len(links)}]\n{title}")
+            await status.edit_text(f"⬇️ [{i}/{len(links)}] {title}")
             
             downloaded = None
             
             try:
                 if is_classx(url):
                     stream_url = get_classx_url(url)
-                    if stream_url:
-                        downloaded = download_m3u8(stream_url, title) if '.m3u8' in stream_url else download_file(stream_url, title)
-                    else:
-                        downloaded = download_m3u8(url, title) if is_m3u8(url) else download_file(url, title)
+                    downloaded = (download_m3u8(stream_url, title) if stream_url and '.m3u8' in stream_url else download_file(stream_url, title)) if stream_url else None
                 
                 elif is_m3u8(url):
                     downloaded = download_m3u8(url, title)
@@ -231,7 +203,7 @@ async def handle_txt(client, msg):
                 await msg.reply_text(f"❌ Error: {title}")
                 failed += 1
         
-        await status.edit_text(f"✅ Done!\nSuccess: {success}\nFailed: {failed}")
+        await status.edit_text(f"✅ Done! Success: {success}, Failed: {failed}")
     
     except Exception as e:
         print(f"[MAIN ERROR] {e}")
@@ -244,31 +216,26 @@ async def handle_txt(client, msg):
             except:
                 pass
 
-# ===== FLASK ROUTES =====
 @app.route('/')
 def home():
-    return "Bot is running! 🔥"
+    return "Bot Running! 🔥"
 
 @app.route('/health')
 def health():
-    return {"status": "ok", "bot": "running"}
+    return {"status": "ok"}
 
-# ===== RUN FUNCTIONS =====
 def run_flask():
-    print("🚀 Starting Flask...")
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 8080)))
 
-def run_pyrogram():
-    print("🤖 Starting Pyrogram...")
-    pyrogram_bot.run()
+def run_bot():
+    bot.run()
 
 if __name__ == "__main__":
-    # Run both Flask and Pyrogram
-    flask_process = Process(target=run_flask)
-    pyrogram_process = Process(target=run_pyrogram)
+    p1 = Process(target=run_flask)
+    p2 = Process(target=run_bot)
     
-    flask_process.start()
-    pyrogram_process.start()
+    p1.start()
+    p2.start()
     
-    flask_process.join()
-    pyrogram_process.join()
+    p1.join()
+    p2.join()
