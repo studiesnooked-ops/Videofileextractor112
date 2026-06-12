@@ -3,10 +3,12 @@ import re
 import yt_dlp
 import requests
 import subprocess
+import signal
+import sys
 from flask import Flask
-from pyrogram import Client, filters
-from multiprocessing import Process
+from pyrogram import Client, Filters
 
+# Flask app (only for web service)
 app = Flask(__name__)
 
 # Environment Variables
@@ -15,7 +17,8 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 SUDO_USERS = [int(x) for x in os.getenv("SUDO_USERS", "").split() if x]
-SUDO_USERS.append(OWNER_ID)
+if OWNER_ID:
+    SUDO_USERS.append(OWNER_ID)
 
 DOWNLOADS_DIR = "downloads"
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
@@ -54,8 +57,7 @@ def download_video(url, title):
             'no_warnings': True,
         }
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        yt_dlp.YoutubeDL(ydl_opts).download([url])
         
         if os.path.exists(output):
             return output
@@ -74,8 +76,8 @@ def download_m3u8(url, title):
         safe_name = clean_filename(title)
         output = os.path.join(DOWNLOADS_DIR, f"{safe_name}.mp4")
         
-        cmd = ['ffmpeg', '-i', url, '-c', 'copy', '-y', output]
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        subprocess.run(['ffmpeg', '-i', url, '-c', 'copy', '-y', output], 
+                      capture_output=True, timeout=300)
         
         return output if os.path.exists(output) else None
     except Exception as e:
@@ -116,12 +118,18 @@ def get_classx_url(api_url):
         print(f"[CLASSX ERROR] {e}")
         return None
 
-@bot.on_message(filters.command("start"))
+# Handlers
+@bot.on_message(Filters.command("start"))
 async def start_cmd(client, msg):
     if has_access(msg.from_user.id):
-        await msg.reply_text("✅ Bot Working!")
+        await msg.reply_text("✅ Bot Working!\n\nSend me a .txt file with links.")
 
-@bot.on_message(filters.document)
+@bot.on_message(Filters.command("ping"))
+async def ping_cmd(client, msg):
+    if has_access(msg.from_user.id):
+        await msg.reply_text("pong 🏓")
+
+@bot.on_message(Filters.document)
 async def handle_txt(client, msg):
     user_id = msg.from_user.id
     
@@ -168,7 +176,8 @@ async def handle_txt(client, msg):
             try:
                 if is_classx(url):
                     stream_url = get_classx_url(url)
-                    downloaded = (download_m3u8(stream_url, title) if stream_url and '.m3u8' in stream_url else download_file(stream_url, title)) if stream_url else None
+                    if stream_url:
+                        downloaded = download_m3u8(stream_url, title) if '.m3u8' in stream_url else download_file(stream_url, title)
                 
                 elif is_m3u8(url):
                     downloaded = download_m3u8(url, title)
@@ -216,6 +225,7 @@ async def handle_txt(client, msg):
             except:
                 pass
 
+# Flask Routes
 @app.route('/')
 def home():
     return "Bot Running! 🔥"
@@ -224,18 +234,11 @@ def home():
 def health():
     return {"status": "ok"}
 
-def run_flask():
-    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 8080)))
-
-def run_bot():
+# Run function
+def run():
+    print("🤖 Starting Pyrogram bot...")
     bot.run()
 
 if __name__ == "__main__":
-    p1 = Process(target=run_flask)
-    p2 = Process(target=run_bot)
-    
-    p1.start()
-    p2.start()
-    
-    p1.join()
-    p2.join()
+    # Only run Flask via gunicorn, run bot separately
+    run()
